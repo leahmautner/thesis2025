@@ -1,0 +1,1809 @@
+---
+title: "THESIS"
+author: "Leah Mautner"
+date: "2025-02-08"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyverse)
+library(survey)
+library(svydiags)
+library(naniar)
+library(stats)
+library(jtools)
+library(labelled)
+library(knitr)
+library(ggplot2)
+library(lmtest)
+library(broom)
+library(gtsummary)
+library(openxlsx)
+```
+
+# Import
+```{r, echo= TRUE}
+setwd("~/Desktop/GPH/Thesis")
+load("NSDUH_2022.Rdata")
+load("NSDUH_2023.Rdata")
+
+NSDUH_2023 <- as.data.frame(puf2023_102124)
+rm(puf2023_102124)
+```
+
+# Merge 
+```{r, echo= TRUE}
+colnames(NSDUH_2022) <- toupper(colnames(NSDUH_2022))
+colnames(NSDUH_2023) <- toupper(colnames(NSDUH_2023))
+
+NSDUH <- bind_rows(NSDUH_2022, NSDUH_2023)
+head(NSDUH)
+count(NSDUH)
+```
+
+#NAs
+```{r, echo= TRUE}
+NA_response <- c(85, 94, 97, 98, 99, ".")
+
+NSDUH <- NSDUH %>%
+  mutate(across(everything(), ~ ifelse(. %in% NA_response, NA, .)))
+```
+
+# Dependent Variable
+```{r, echo= TRUE}
+NSDUH <- NSDUH %>% mutate(
+  Cost = as.integer(rowSums(across(c(MHNTCOST, MHNTINSCV, MHNTENFCV)), na.rm = TRUE) >= 1),
+  Structural = as.integer(rowSums(across(c(MHNTWHER, MHNTNOFND, MHNTNOOPN, MHNTPROBS, MHNTTIME)), na.rm = TRUE) >= 1),
+  Minimization = as.integer(rowSums(across(c(MHNTSTART, MHNTHNDL)), na.rm = TRUE) >= 1), 
+  Perceived_Eff = as.integer(rowSums(across(c(MHNTNOHLP, MHNTCARE)), na.rm = TRUE) >= 1), 
+  Stigma = as.integer(rowSums(across(c(MHNTPTHNK, MHNTCONSQ, MHNTFFLKE, MHNTFORCE, MHNTMEDS, MHNTPRIV)), na.rm = TRUE) >= 1)
+)
+
+
+NSDUH %>% summarise(Cost_n = sum(Cost, na.rm= TRUE), Structural_n= sum(Structural, na.rm= TRUE), Minimization_n= sum(Minimization, na.rm= TRUE), Perceived_n = sum(Perceived_Eff, na.rm= TRUE), Stigma_n = sum(Stigma, na.rm=TRUE))
+
+NSDUH <- NSDUH %>%
+  mutate(
+    barrier_number = rowSums(across(c(
+      MHNTCOST, MHNTINSCV, MHNTENFCV, MHNTWHER, MHNTNOFND, MHNTNOOPN, 
+      MHNTPROBS, MHNTTIME, MHNTSTART, MHNTHNDL, MHNTNOHLP, MHNTCARE, 
+      MHNTPTHNK, MHNTCONSQ, MHNTFFLKE, MHNTFORCE, MHNTMEDS, MHNTPRIV
+    )), na.rm = TRUE)
+  ) %>%
+  mutate(barrier_number = replace_na(barrier_number, 0))  
+table(NSDUH$barrier_number)
+
+NSDUH <- NSDUH %>% mutate(barrier_groups = rowSums(across(c(Cost, Structural, Minimization, Perceived_Eff, Stigma)), na.rm=TRUE))
+table(NSDUH$barrier_groups)
+```
+
+
+# Operationalize (When not imputed, N= 113 missing (~2%))
+```{r, echo= TRUE}
+#Insurance
+NSDUH <- NSDUH %>%
+  mutate(
+    public_insur = ifelse(IRMEDICR == 1 | IRMCDCHP == 1 | IRCHMPUS == 1, 1, 0),
+    private_insur = ifelse(IRPRVHLT == 1, 1, 0),
+    other_insur = ifelse(IROTHHLT == 1, 1, 0),
+    no_insur = ifelse(IRINSUR4 == 2, 1, 0)
+  )
+
+NSDUH <- NSDUH %>% mutate(Insurance = case_when(no_insur== 1 ~ 0, public_insur== 1 ~ 1, private_insur==1 ~2, other_insur==1~ 3))
+table(NSDUH$Insurance)
+
+NSDUH %>%
+  mutate(
+    Overlap = rowSums(across(c(public_insur, private_insur, other_insur, no_insur), ~ . == 1), na.rm = TRUE)
+  ) %>%
+  count(Overlap) 
+
+table(NSDUH$public_insur, NSDUH$private_insur) # Overlap all comes from here, likely Medicare + private
+table(NSDUH$public_insur, NSDUH$other_insur)    
+table(NSDUH$private_insur, NSDUH$other_insur)  
+table(NSDUH$no_insur, NSDUH$public_insur)       
+
+
+NSDUH %>% count(is.na(Insurance))
+
+#Distress
+NSDUH$distress_level <- cut(NSDUH$KSSLR6MAX, 
+                            breaks= c(0, 5, 13, 25),
+                            labels= c("1", "2", "3"),
+                            right= FALSE)
+table(NSDUH$distress_level)
+
+#Disability
+NSDUH$disability_level <- cut(NSDUH$WHODASTOTSC, 
+                            breaks= c(0, 8, 13, 25),
+                            labels= c("1", "2", "3"),
+                            right= FALSE)
+table(NSDUH$disability_level)
+```
+
+
+# Rename
+```{r, echo= TRUE}
+colnames(NSDUH) <- toupper(colnames(NSDUH))
+
+NSDUH <- NSDUH %>% rename(ID= QUESTID2, Cost= COST, Structural= STRUCTURAL, Minimization= MINIMIZATION, Low_perc_eff= PERCEIVED_EFF, Stigma= STIGMA, Age= CATAG6, Sex= IRSEX, Marital_status= IRMARIT, Education= EDUHIGHCAT, Race= NEWRACE2, Urbanicity= COUTYP4, Poverty= POVERTY3, Health_status= HEALTH, Employment_status= IRWRKSTAT18, Alcohol_Use= BNGDRKMON, Drug_Use= ILLMON, SUD= UD5ILALANY, Whodas_raw= WHODASTOTSC, Kessler_raw= KSSLR6MAX, Insurance=INSURANCE, Distress=DISTRESS_LEVEL, Disability=DISABILITY_LEVEL, Barrier_total= BARRIER_NUMBER, Barrier_grouptotal = BARRIER_GROUPS, Subset_Utilization= MHTRTPY, Subset_UnmetNeed= MHTSKTHPY, Subset_Age= CATAGE, Income= INCOME)
+```
+
+# Variable Types and Labels
+```{r, echo= TRUE}
+NSDUH <- NSDUH %>% mutate(across(c(Cost, Structural, Minimization, Low_perc_eff, Stigma), as.integer))
+
+NSDUH <- NSDUH %>% mutate(across(c(Whodas_raw, Kessler_raw), as.numeric))  
+
+NSDUH <- NSDUH %>% mutate(
+  Age= factor(Age,
+              levels= c(1, 2, 3, 4, 5, 6),
+              labels= c("12-17", "18-25", "26-34", "35-49", "50+", "50+")),
+  Sex= factor(Sex, 
+              levels= c(1,2),
+              labels= c("Male", "Female")), 
+  Marital_status= factor(Marital_status, 
+                         levels= c(1,2,3,4),
+                         labels= c("Married", "Widowed/Divorced/Separated", "Widowed/Divorced/Separated", "Never Married")),
+  Education= factor(Education,
+                    levels= c(1,2,3,4,5),
+                    labels= c("Less than HS", "HS Grad", "Some College/Assoc Degree", "Colleg Grad", "12-17")),
+  Race= factor(Race,
+               levels= c(1,2,3,4,5,6,7),
+               labels= c("Non-Hisp White", "Non-Hisp Black/Afr Am", "Non-Hisp Native Am/AK Native/Native HI/Other PI", "Non-Hisp Native Am/AK Native/Native HI/Other PI", "Non-Hisp Asian", "Non-Hisp Multi Race", "Hispanic")),
+  Urbanicity= factor(Urbanicity,
+                     levels= c(1,2,3),
+                     labels= c("Large Metro", "Small Metro", "Nonmetro")),
+  Poverty= factor(Poverty,
+                  levels= c(1,2,3),
+                  labels= c("Living in Poverty", "Income Up to 2x FPL", "Income More than 2x FPL")),
+  Income= factor(Income,
+                 levels= c(1, 2, 3, 4),
+                 labels= c("Less than $20,000", "$20,000-$49,000", "50,000-$75,000", "$75,000 or More")),
+  Health_status= factor(Health_status,
+                        levels= c(1,2,3,4,5),
+                        labels= c("Excellent", "Very Good", "Good", "Fair", "Poor")),
+  Employment_status= factor(Employment_status,
+                            levels= c(1,2,3,4),
+                            labels= c("Full time", "Part time", "Unemployed", "Other")),
+  SUD= factor(SUD,
+              levels= c(0,1),
+              labels= c("No SUD", "SUD")),
+  Drug_Use= factor(Drug_Use, 
+                   levels= c(0,1),
+                   labels= c("No Past Month Use", "Past Month Use")),
+  Alcohol_Use= factor(Alcohol_Use, 
+                      levels= c(0,1),
+                      labels= c("No Past Month Binge Drinking", "Past Month Binge Drinking")),
+  Insurance= factor(Insurance, 
+                    levels= c(0,1,2,3),
+                    labels= c("No Insurance", "Public Insurance", "Private Insurance", "Other Insurance")),
+  Distress= factor(Distress,
+                   levels= c(1,2,3),
+                   labels= c("Low PD", "Moderate PD", "Severe PD")),
+  Disability= factor(Disability,
+                     levels= c(1,2,3),
+                     labels= c("Low Disability", "Moderate Disability", "High Disability")),
+)
+
+NSDUH$Age <- droplevels(NSDUH$Age)
+NSDUH$Marital_status <- droplevels(NSDUH$Marital_status)
+NSDUH$Race <- droplevels(NSDUH$Race)
+
+NSDUH <- NSDUH %>%
+  mutate(
+    Race = as.character(Race),                  
+    Race = ifelse(Race == "Non-Hisp Native Am/AK Native/Native HI/Other PI", 
+                  "Non-Hisp Multi Race", Race),  
+    Race = factor(Race)                        
+  ) %>%
+  mutate(
+    Race = droplevels(Race)                     
+  )
+table(NSDUH$Race)
+```
+
+
+# Check for collinearity 
+```{r, echo= TRUE}
+# Cross-Tab 
+dv_data <- NSDUH_sample %>%
+  dplyr::select(Cost, Structural, Minimization, Low_perc_eff, Stigma) %>%
+  mutate(across(everything(), as.numeric)) 
+
+crosstab_counts <- t(as.matrix(dv_data)) %*% as.matrix(dv_data)
+
+crosstab_percent <- round(100 * crosstab_counts / nrow(NSDUH_sample), 2)
+
+crosstab_combined <- as.data.frame(crosstab_counts)
+crosstab_combined[] <- paste0(crosstab_counts, " (", crosstab_percent, "%)")
+
+kable(crosstab_combined, format = "markdown", caption = "Barrier Group Overlap (Counts & Percentages)")
+
+
+Cor_1 <- NSDUH %>% dplyr::filter(Subset_UnmetNeed == 1 & Subset_Age != 1) %>% dplyr::select(Cost, Structural, Minimization, Low_perc_eff, Stigma) %>% cor(use="complete.obs")
+
+print(Cor_1)
+Cor_1 <- as.data.frame(Cor_1)
+Cor_1_Round <- round(Cor_1, 4)
+write.csv(Cor_1_Round, "correlation_matrix.csv")
+
+#significance
+vars <- colnames(Cor_1)
+n <- length(vars)
+p_value <- matrix(NA, n, n)
+
+for(i in 1:(n-1)) {
+  for(j in (i+1):n) {
+    var1 <- vars[i]
+    var2 <- vars[j]
+test_result <- cor.test(Cor_1[,i], Cor_1[,j], method = "pearson")
+    p_value[i, j] <- test_result$p.value
+    p_value[j, i] <- test_result$p.value  
+  }
+}
+
+p_valuedf <- as.data.frame(p_value)
+colnames(p_valuedf) <- rownames(p_valuedf) <- vars
+
+print(p_valuedf) #no significant correlations 
+```
+
+```{r}
+library(polycor)
+library(knitr)
+
+# Compute tetrachoric correlation matrix
+tetrachoric_corr_matrix <- hetcor(NSDUH_sample[, dv_groups], std.err = TRUE)
+
+# Extract correlation coefficients
+cor_matrix <- round(tetrachoric_corr_matrix$correlations, 3)
+
+# Extract standard errors
+se_matrix <- round(tetrachoric_corr_matrix$std.errors, 3)
+
+# Compute 95% Confidence Intervals
+ci_lower <- cor_matrix - 1.96 * se_matrix
+ci_upper <- cor_matrix + 1.96 * se_matrix
+
+# Mark significance based on confidence intervals
+p_values <- ifelse(ci_lower * ci_upper > 0, "< 0.05", "≥ 0.05")
+
+# Format matrix with coefficients and p-values
+formatted_matrix <- matrix("", nrow = length(dv_groups), ncol = length(dv_groups))
+rownames(formatted_matrix) <- colnames(formatted_matrix) <- dv_groups
+
+for (i in 1:length(dv_groups)) {
+  for (j in 1:length(dv_groups)) {
+    if (i == j) {
+      formatted_matrix[i, j] <- "1 (NA)"
+    } else {
+      formatted_matrix[i, j] <- paste0(cor_matrix[i, j], " (", p_values[i, j], ")")
+    }
+  }
+}
+
+# Print the table
+kable(formatted_matrix, caption = "Unweighted Tetrachoric Correlation Matrix with Confidence Intervals for Significance")
+
+
+```
+
+
+# Create DF
+```{r, echo= TRUE}
+NSDUH <- NSDUH %>% dplyr::select(ID, VEREP, VESTR_C, ANALWT2_C, Subset_Utilization, Subset_UnmetNeed, Subset_Age, Cost, Structural, Minimization, Low_perc_eff, Stigma, Whodas_raw, Kessler_raw, Barrier_total, Barrier_grouptotal, Age, Sex, Marital_status, Education, Race, Urbanicity, Poverty, Health_status, Employment_status, SUD, Insurance, Distress, Disability, Income, Drug_Use, Alcohol_Use)
+count(NSDUH)
+
+NSDUH %>%
+  dplyr::filter(Subset_UnmetNeed == 1 & Subset_Age != 1) %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) #Insurance NA= 113, Poverty NA= 3, Health Status NA= 2
+
+NSDUH %>% dplyr::filter(Subset_UnmetNeed == 1 & Subset_Age != 1) %>% filter(is.na(Insurance)) %>% pull(Distress) %>% table() #N=113 missing for age, 74 of which are severe PD when not using imputed*
+
+NSDUH <- NSDUH %>% drop_na(Poverty) %>% drop_na(Health_status)
+
+NSDUH %>% dplyr::filter(Subset_Age != 1) %>% pull(Subset_Utilization) %>% table()
+
+NSDUH_sample <- NSDUH %>%
+  dplyr::filter(Subset_UnmetNeed == 1 & Subset_Age != 1)
+
+
+str(NSDUH)
+```
+
+# Closer look 
+```{r, echo= TRUE}
+table(NSDUH_sample$Stigma, NSDUH_sample$Minimization)
+table(NSDUH_sample$Stigma, NSDUH_sample$Low_perc_eff)
+table(NSDUH_sample$Minimization, NSDUH_sample$Low_perc_eff)
+table(NSDUH_sample$Cost, NSDUH_sample$Structural)
+
+table(NSDUH_sample$Stigma, NSDUH_sample$Race)
+```
+
+# Analytic Sample 
+```{r, echo= TRUE}
+NSDUH %>% filter(Subset_Age != 1) %>% pull(Subset_Utilization) %>% table()
+
+NSDUH %>% filter(Subset_Age != 1 & Subset_Utilization == 0) %>% pull(Subset_UnmetNeed) %>% table()
+```
+
+# Missing Observations 
+```{r, echo= TRUE}
+Missing <- NSDUH %>% filter(Subset_Age != 1)
+Missing <- Missing %>% filter(Subset_Utilization == 0 & is.na(Subset_UnmetNeed))
+
+total_n <- nrow(Missing)
+
+bind_rows(
+  as.data.frame(table(Missing$Age)) %>% mutate(Variable = "Age"),
+  as.data.frame(table(Missing$Sex)) %>% mutate(Variable = "Sex"),
+  as.data.frame(table(Missing$Marital_status)) %>% mutate(Variable = "Marital_status"),
+  as.data.frame(table(Missing$Education)) %>% mutate(Variable = "Education"),
+  as.data.frame(table(Missing$Race)) %>% mutate(Variable = "Race"),
+  as.data.frame(table(Missing$Urbanicity)) %>% mutate(Variable = "Urbanicity"),
+  as.data.frame(table(Missing$Poverty)) %>% mutate(Variable = "Poverty"),
+  as.data.frame(table(Missing$Health_status)) %>% mutate(Variable = "Health_status"),
+  as.data.frame(table(Missing$Employment_status)) %>% mutate(Variable = "Employment_status"),
+  as.data.frame(table(Missing$SUD)) %>% mutate(Variable = "SUD"),
+  as.data.frame(table(Missing$Insurance)) %>% mutate(Variable = "Insurance"),
+  as.data.frame(table(Missing$Disability)) %>% mutate(Variable = "Disability"),
+    as.data.frame(table(Missing$Distress)) %>% mutate(Variable = "Distress")
+) %>%
+  rename(Level = Var1, Count = Freq) %>%
+  mutate(Proportion = round((Count / total_n) * 100, 2)) #Seems relatively normally distributed
+```
+
+# Export to STATA
+```{r}
+library(haven)
+library(dplyr)
+library(labelled)
+
+categorical_vars <- c("Age", "Sex", "Marital_status", "Education", "Race", "Urbanicity",
+                      "Poverty", "Health_status", "Employment_status", "SUD", "Insurance",
+                      "Disability", "Education", "Income", "Drug_Use", "Alcohol_Use", "Distress")
+
+NSDUH <- NSDUH %>%
+  mutate(across(all_of(categorical_vars), as.factor)) 
+
+for (var in categorical_vars) {
+  NSDUH[[var]] <- labelled::to_factor(NSDUH[[var]])
+}
+
+write_dta(NSDUH, "NSDUH.dta", version = 14)
+```
+
+
+# Survey Weights
+```{r, echo= TRUE}
+NSDUH <- NSDUH %>% mutate(across(c(Cost, Structural, Minimization, Low_perc_eff, Stigma), as.factor))
+
+NSDUH <- NSDUH %>% mutate(across(c(VEREP, VESTR_C), as.factor))
+class(NSDUH$ANALWT2_C)
+
+NSDUH$ANALWT2_Adjusted <- NSDUH$ANALWT2_C/2
+
+NSDUH_weights <- svydesign(
+  id= ~ VEREP,
+  strata= ~ VESTR_C,
+  weights= ~ ANALWT2_Adjusted,
+  data= NSDUH,
+  nest= TRUE
+)
+summary(NSDUH_weights)
+
+NSDUH_subset <- subset(NSDUH_weights, Subset_UnmetNeed == 1 & Subset_Age != 1)
+head(NSDUH_subset)
+str(NSDUH_subset)
+nrow(NSDUH_subset$variables)
+
+NSDUH_subset <- update(NSDUH_subset, Age = droplevels(as.factor(Age)))
+NSDUH_subset <- update(NSDUH_subset, Education = droplevels(as.factor(Education)))
+```
+
+# Weighted DV Collinearity 
+```{r}
+library(survey)
+
+barrier_vars <- c("Cost", "Structural", "Minimization", "Low_perc_eff", "Stigma") 
+
+
+for (var in barrier_vars) {
+  NSDUH_subset$variables[[var]] <- as.numeric(NSDUH_subset$variables[[var]])
+}
+
+
+cov_matrix <- svyvar(as.formula(paste("~", paste(barrier_vars, collapse = " + "))), design = NSDUH_subset)
+cor_matrix <- cov2cor(as.matrix(cov_matrix))
+
+
+se_matrix <- sqrt(diag(cov_matrix))
+p_values <- 2 * (1 - pnorm(abs(cor_matrix / outer(se_matrix, se_matrix, "*"))))
+
+cor_matrix <- round(cor_matrix, 3)
+p_values <- round(p_values, 3)
+
+cor_p_matrix <- matrix("", nrow=length(barrier_vars), ncol=length(barrier_vars))
+rownames(cor_p_matrix) <- colnames(cor_p_matrix) <- barrier_vars
+
+for (i in 1:length(barrier_vars)) {
+  for (j in 1:length(barrier_vars)) {
+    cor_p_matrix[i, j] <- paste0(cor_matrix[i, j], " (", p_values[i, j], ")")  
+  }
+}
+
+kable(cor_p_matrix, caption = "Survey-Weighted Correlation Matrix with P-values")
+table(NSDUH_subset$Cost, NSDUH_subset$Structural)
+```
+
+# Tetrachoric Correlation Matrix (binary)
+```{r}
+library(polycor)
+
+compute_tetrachoric_correlations <- function(design, dv_groups) {
+  design$variables[dv_groups] <- lapply(design$variables[dv_groups], function(x) as.numeric(x == TRUE))
+
+  tetrachoric_results <- hetcor(design$variables[, dv_groups], std.err = TRUE)
+
+  cor_matrix <- round(tetrachoric_results$correlations, 3)
+
+  return(list(cor_matrix = cor_matrix))
+}
+
+tetra_results <- compute_tetrachoric_correlations(NSDUH_subset, dv_groups)
+view(tetra_results)
+```
+
+
+# Weighted Univariable
+## Continuous 
+```{r, echo= TRUE}
+svymean(~Kessler_raw, design= NSDUH_subset)
+svyquantile(~Kessler_raw, design= NSDUH_subset, quantiles=c(0.25, 0.5, 0.75))
+sqrt(svyvar(~Kessler_raw, design = NSDUH_subset))
+
+svymean(~Barrier_total, design= NSDUH_subset)
+svyquantile(~Barrier_total, design= NSDUH_subset, quantiles=c(0.25, 0.5, 0.75))
+sqrt(svyvar(~Barrier_total, design = NSDUH_subset))
+
+NSDUH_subset$Barrier_grouptotal <- as.integer(NSDUH_subset$Barrier_grouptotal)
+table(NSDUH_subset$Barrier_grouptotal)
+
+svymean(~ Barrier_grouptotal, design= NSDUH_subset)
+svyquantile(~ Barrier_grouptotal, design= NSDUH_subset, quantiles=c(0.25, 0.5, 0.75))
+sqrt(svyvar(~Barrier_grouptotal, design = NSDUH_subset))
+```
+
+## Categorical
+```{r, echo= TRUE}
+categorical_vars <- c("Cost", "Structural", "Minimization", "Low_perc_eff", "Stigma", "Age", "Sex", "Marital_status", "Education", "Race", "Urbanicity", "Poverty", "Health_status", "Employment_status", "SUD", "Insurance", "Distress", "Disability")
+
+# Prop
+calculate_proportions <- function(categorical_vars, NSDUH_subset) {
+  results <- list()
+  
+  for (var in categorical_vars) {
+    formula_var <- as.formula(paste0("~", var))
+    
+    svy_props <- svymean(formula_var, NSDUH_subset)
+    
+    results[[var]] <- data.frame(
+      Category = names(svy_props),
+      Proportion = round(as.numeric(svy_props) * 100, 2)  
+    )
+  }
+  
+  return(results)
+}
+
+proportions <- calculate_proportions(categorical_vars, NSDUH_subset)
+print(proportions)
+
+# 95% CI
+calculate_confidence_intervals <- function(categorical_vars, NSDUH_subset) {
+  results <- list()
+  
+  for (var in categorical_vars) {
+    formula_var <- as.formula(paste0("~", var))
+    
+    # Compute weighted proportions with confidence intervals
+    svy_props <- svymean(formula_var, NSDUH_subset, vartype = "ci")
+    
+    # Store formatted results
+    results[[var]] <- data.frame(
+      Category = names(svy_props),
+      Lower_CI = round(confint(svy_props)[, 1] * 100, 2),  # Lower bound
+      Upper_CI = round(confint(svy_props)[, 2] * 100, 2)   # Upper bound
+    )
+  }
+  
+  return(results)
+}
+
+conf_intervals <- calculate_confidence_intervals(categorical_vars, NSDUH_subset)
+print(conf_intervals)
+
+prop <- svymean(~factor(Race), design = NSDUH_subset, vartype = "ci")
+confint(prop)
+```
+
+
+# Unweighted Univariable
+## Continuous 
+```{r, echo= TRUE}
+mean(NSDUH_sample$Kessler_raw)
+quantile(NSDUH_sample$Kessler_raw, probs=c(0.25, 0.5, 0.75))
+sd(NSDUH_sample$Kessler_raw)
+ggplot(data = NSDUH_sample) + geom_boxplot(aes(x="", y= Kessler_raw))
+
+mean(NSDUH_sample$Barrier_total)
+quantile(NSDUH_sample$Barrier_total, probs=c(0.25, 0.5, 0.75))
+sd(NSDUH_sample$Barrier_total)
+ggplot(data = NSDUH_sample) + geom_boxplot(aes(x="", y= Barrier_total))
+
+mean(NSDUH_sample$Barrier_grouptotal)
+quantile(NSDUH_sample$Barrier_grouptotal, probs=c(0.25, 0.5, 0.75))
+sd(NSDUH_sample$Barrier_grouptotal)
+ggplot(data = NSDUH_sample) + geom_boxplot(aes(x="", y= Barrier_grouptotal))
+```
+
+
+## Categorical
+```{r, echo= TRUE}
+unweighted_categorical_univariable <- function(categorical_vars, NSDUH_sample) {
+  results_unweighted <- list()
+  
+  for(var in categorical_vars) {
+    raw_count <- table(NSDUH_sample[[var]])
+    raw_prop <- prop.table(raw_count) * 100
+    
+    summary_tab <- data.frame(Category_=names(raw_count), Count=as.numeric(raw_count), Percentage_=round(raw_prop, 3))
+  
+results_unweighted[[var]] <- summary_tab
+  }
+  return(results_unweighted)
+}
+
+univariable_unweighted <- unweighted_categorical_univariable(categorical_vars, NSDUH_sample)
+
+lapply(univariable_unweighted, function(NSDUH_sample) kable(NSDUH_sample))
+
+NSDUH_sample %>% count(Income) %>% mutate(pct = 100 * n / sum(n)) %>% kable()
+NSDUH_sample %>% count(Drug_Use) %>% mutate(pct = 100 * n / sum(n)) %>% kable()
+```
+
+# Normality Test 
+```{r, echo= TRUE}
+library(nortest)
+ad.test(NSDUH_sample$Kessler_raw)
+ad.test(NSDUH_sample$Barrier_total)
+```
+
+# Weighted Bivariable for IV 
+## Categorical
+```{r}
+distress_cat_bivariable <- svyby(
+  ~ Cost + Structural + Minimization + Low_perc_eff + Stigma + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability,
+  ~ Distress,
+  NSDUH_subset,
+  svymean,
+  vartype= "ci"
+) 
+
+distress_cat_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+```
+## Continuous 
+```{r}
+distress_cont_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Distress,
+  NSDUH_subset,
+  svymean,
+  sd=sqrt(svyvar()),
+  vartype= NULL
+) 
+
+distress_cont_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+distress_contin_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Distress,
+  NSDUH_subset,
+  svyquantile,
+  quantiles=c(0.25,0.50,0.75),
+  vartype= NULL
+)
+
+distress_contin_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+```
+
+## Chi-sq (CHECK W SOMEONE)
+```{r}
+NSDUH_subset$Age <- droplevels(NSDUH_subset$Age)
+NSDUH_subset$Education <- droplevels(NSDUH_subset$Education)
+
+categorical_var <- c("Cost", "Structural", "Minimization", "Low_perc_eff", "Stigma", "Age", "Sex", "Marital_status", "Education", "Race", "Urbanicity", "Poverty", "Health_status", "Employment_status", "SUD", "Insurance", "Disability")
+
+chi_square <- function(var) {
+  test <- svychisq(as.formula(paste("~", var, "+ Distress")), design = NSDUH_subset)
+  result <- data.frame(
+    Variable = var,
+    Chi_Square_Stat = round(test$statistic, 3),
+    P_Value = ifelse(test$p.value < 0.001, "<0.001", round(test$p.value, 3))
+  )
+  return(result)
+}
+
+results <- do.call(rbind, lapply(categorical_var, chi_square))
+kable(results)
+```
+
+## Continuous 
+```{r}
+wald_svy <- function(var) {
+  model <- svyglm(as.formula(paste(var, "~ Distress")), design = NSDUH_subset)
+  
+  test <- regTermTest(model, ~ Distress)
+  
+  result <- data.frame(
+    Variable = var,
+    Wald_Statistic = round(test$Ftest, 3),
+    P_Value = ifelse(test$p < 0.001, "<0.001", round(test$p, 3))
+  )
+  
+  return(result)
+}
+
+kable(wald_svy("Kessler_raw"))
+kable(wald_svy("Barrier_total"))
+kable(wald_svy("Barrier_grouptotal"))
+```
+
+# Weighted Bivariable for DV 
+```{r}
+# Cost 
+# Categorical
+cost_cat_bivariable <- svyby(
+  ~ Structural + Minimization + Low_perc_eff + Stigma + Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability,
+  ~ Cost,
+  NSDUH_subset,
+  svymean,
+  vartype= "ci"
+) 
+
+cost_cat_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+# Continuous
+cost_cont_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Cost,
+  NSDUH_subset,
+  svymean,
+  sd=sqrt(svyvar()),
+  vartype= NULL
+) 
+
+cost_cont_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+cost_contin_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Cost,
+  NSDUH_subset,
+  svyquantile,
+  quantiles=c(0.25,0.50,0.75),
+  vartype= NULL
+)
+
+cost_contin_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+# Chi-sq
+categorical_var1 <- c("Structural", "Minimization", "Low_perc_eff", "Stigma", "Age", "Sex", "Marital_status", "Education", "Race", "Urbanicity", "Poverty", "Health_status", "Employment_status", "SUD", "Insurance", "Distress", "Disability")
+
+chi_square1 <- function(var) {
+  test <- svychisq(as.formula(paste("~", var, "+ Cost")), design = NSDUH_subset)
+  result1 <- data.frame(
+    Variable = var,
+    Chi_Square_Stat = round(test$statistic, 3),
+    P_Value = ifelse(test$p.value < 0.001, "<0.001", round(test$p.value, 3))
+  )
+  return(result1)
+}
+
+results1 <- do.call(rbind, lapply(categorical_var1, chi_square1))
+kable(results1)
+
+# Wald
+wald_svy1 <- function(var) {
+  model <- svyglm(as.formula(paste(var, "~ Cost")), design = NSDUH_subset)
+  
+  test <- regTermTest(model, ~ Cost)
+  
+  result1 <- data.frame(
+    Variable = var,
+    Wald_Statistic = round(test$Ftest, 3),
+    P_Value = ifelse(test$p < 0.001, "<0.001", round(test$p, 3))
+  )
+  
+  return(result1)
+}
+
+kable(wald_svy1("Kessler_raw"))
+kable(wald_svy1("Barrier_total"))
+kable(wald_svy1("Barrier_grouptotal"))
+```
+
+```{r}
+# Structural 
+# Categorical
+structural_cat_bivariable <- svyby(
+  ~ Cost + Minimization + Low_perc_eff + Stigma + Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability,
+  ~ Structural,
+  NSDUH_subset,
+  svymean,
+  vartype= "ci"
+) 
+
+structural_cat_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+# Continuous
+structural_cont_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Structural,
+  NSDUH_subset,
+  svymean,
+  sd=sqrt(svyvar()),
+  vartype= NULL
+) 
+
+structural_cont_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+structural_contin_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Structural,
+  NSDUH_subset,
+  svyquantile,
+  quantiles=c(0.25,0.50,0.75),
+  vartype= NULL
+)
+
+structural_contin_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+# Chi-sq
+categorical_var2 <- c("Cost", "Minimization", "Low_perc_eff", "Stigma", "Age", "Sex", "Marital_status", "Education", "Race", "Urbanicity", "Poverty", "Health_status", "Employment_status", "SUD", "Insurance", "Distress", "Disability")
+
+chi_square2 <- function(var) {
+  test <- svychisq(as.formula(paste("~", var, "+ Structural")), design = NSDUH_subset)
+  result2 <- data.frame(
+    Variable = var,
+    Chi_Square_Stat = round(test$statistic, 3),
+    P_Value = ifelse(test$p.value < 0.001, "<0.001", round(test$p.value, 3))
+  )
+  return(result2)
+}
+
+results2 <- do.call(rbind, lapply(categorical_var2, chi_square2))
+kable(results2)
+
+# Wald
+wald_svy2 <- function(var) {
+  model <- svyglm(as.formula(paste(var, "~ Structural")), design = NSDUH_subset)
+  
+  test <- regTermTest(model, ~ Structural)
+  
+  result2 <- data.frame(
+    Variable = var,
+    Wald_Statistic = round(test$Ftest, 3),
+    P_Value = ifelse(test$p < 0.001, "<0.001", round(test$p, 3))
+  )
+  
+  return(result2)
+}
+
+kable(wald_svy2("Kessler_raw"))
+kable(wald_svy2("Barrier_total"))
+kable(wald_svy2("Barrier_grouptotal"))
+
+#NAs
+svychisq(~ Age + Stigma, design = NSDUH_subset)
+svychisq(~ Education + Stigma, design = NSDUH_subset)
+```
+
+```{r}
+# Minimization
+# Categorical
+min_cat_bivariable <- svyby(
+  ~ Cost + Structural + Low_perc_eff + Stigma + Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability,
+  ~ Minimization,
+  NSDUH_subset,
+  svymean,
+  vartype= "ci"
+) 
+
+min_cat_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+# Continuous
+min_cont_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Minimization,
+  NSDUH_subset,
+  svymean,
+  sd=sqrt(svyvar()),
+  vartype= NULL
+) 
+
+min_cont_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+min_contin_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Minimization,
+  NSDUH_subset,
+  svyquantile,
+  quantiles=c(0.25,0.50,0.75),
+  vartype= NULL
+)
+
+min_contin_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+# Chi-sq
+categorical_var3 <- c("Cost", "Structural", "Low_perc_eff", "Stigma", "Age", "Sex", "Marital_status", "Education", "Race", "Urbanicity", "Poverty", "Health_status", "Employment_status", "SUD", "Insurance", "Distress", "Disability")
+
+chi_square3 <- function(var) {
+  test <- svychisq(as.formula(paste("~", var, "+ Minimization")), design = NSDUH_subset)
+  result3 <- data.frame(
+    Variable = var,
+    Chi_Square_Stat = round(test$statistic, 3),
+    P_Value = ifelse(test$p.value < 0.001, "<0.001", round(test$p.value, 3))
+  )
+  return(result3)
+}
+
+results3 <- do.call(rbind, lapply(categorical_var3, chi_square3))
+kable(results3)
+
+# Wald
+wald_svy3 <- function(var) {
+  model <- svyglm(as.formula(paste(var, "~ Minimization")), design = NSDUH_subset)
+  
+  test <- regTermTest(model, ~ Minimization)
+  
+  result3 <- data.frame(
+    Variable = var,
+    Wald_Statistic = round(test$Ftest, 3),
+    P_Value = ifelse(test$p < 0.001, "<0.001", round(test$p, 3))
+  )
+  
+  return(result3)
+}
+
+kable(wald_svy3("Kessler_raw"))
+kable(wald_svy3("Barrier_total"))
+kable(wald_svy3("Barrier_grouptotal"))
+```
+
+```{r}
+# Low Perceived Effectiveness 
+# Categorical
+loweff_cat_bivariable <- svyby(
+  ~ Structural + Minimization + Cost + Stigma + Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability,
+  ~ Low_perc_eff,
+  NSDUH_subset,
+  svymean,
+  vartype= "ci"
+) 
+
+loweff_cat_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+# Continuous
+loweff_cont_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Low_perc_eff,
+  NSDUH_subset,
+  svymean,
+  sd=sqrt(svyvar()),
+  vartype= NULL
+) 
+
+loweff_cont_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+loweff_contin_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Low_perc_eff,
+  NSDUH_subset,
+  svyquantile,
+  quantiles=c(0.25,0.50,0.75),
+  vartype= NULL
+)
+
+loweff_contin_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+# Chi-sq
+categorical_var4 <- c("Cost", "Structural", "Minimization", "Stigma", "Age", "Sex", "Marital_status", "Education", "Race", "Urbanicity", "Poverty", "Health_status", "Employment_status", "SUD", "Insurance", "Distress", "Disability")
+
+chi_square4 <- function(var) {
+  test <- svychisq(as.formula(paste("~", var, "+ Low_perc_eff")), design = NSDUH_subset)
+  result4 <- data.frame(
+    Variable = var,
+    Chi_Square_Stat = round(test$statistic, 3),
+    P_Value = ifelse(test$p.value < 0.001, "<0.001", round(test$p.value, 3))
+  )
+  return(result4)
+}
+
+results4 <- do.call(rbind, lapply(categorical_var4, chi_square4))
+kable(results4)
+
+# Wald
+wald_svy4 <- function(var) {
+  model <- svyglm(as.formula(paste(var, "~ Low_perc_eff")), design = NSDUH_subset)
+  
+  test <- regTermTest(model, ~ Low_perc_eff)
+  
+  result4 <- data.frame(
+    Variable = var,
+    Wald_Statistic = round(test$Ftest, 3),
+    P_Value = ifelse(test$p < 0.001, "<0.001", round(test$p, 3))
+  )
+  
+  return(result4)
+}
+
+kable(wald_svy4("Kessler_raw"))
+kable(wald_svy4("Barrier_total"))
+kable(wald_svy4("Barrier_grouptotal"))
+```
+
+```{r}
+# Stigma 
+# Categorical
+stigma_cat_bivariable <- svyby(
+  ~ Structural + Minimization + Low_perc_eff + Cost + Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability,
+  ~ Stigma,
+  NSDUH_subset,
+  svymean,
+  vartype= "ci"
+) 
+
+stigma_cat_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+# Continuous 
+stigma_cont_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Stigma,
+  NSDUH_subset,
+  svymean,
+  sd=sqrt(svyvar()),
+  vartype= NULL
+) 
+
+stigma_cont_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+stigma_contin_bivariable <- svyby(
+  ~ Kessler_raw + Barrier_total + Barrier_grouptotal,
+  ~ Stigma,
+  NSDUH_subset,
+  svyquantile,
+  quantiles=c(0.25,0.50,0.75),
+  vartype= NULL
+)
+
+stigma_contin_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
+
+# Chi-sq
+categorical_var5 <- c("Cost", "Structural", "Low_perc_eff", "Minimization", "Age", "Sex", "Marital_status", "Education", "Race", "Urbanicity", "Poverty", "Health_status", "Employment_status", "SUD", "Insurance", "Distress", "Disability")
+
+chi_square5 <- function(var) {
+  test <- svychisq(as.formula(paste("~", var, "+ Stigma")), design = NSDUH_subset)
+  result5 <- data.frame(
+    Variable = var,
+    Chi_Square_Stat = round(test$statistic, 3),
+    P_Value = ifelse(test$p.value < 0.001, "<0.001", round(test$p.value, 3))
+  )
+  return(result5)
+}
+
+results5 <- do.call(rbind, lapply(categorical_var5, chi_square5))
+kable(results5)
+
+# Wald
+wald_svy5 <- function(var) {
+  model <- svyglm(as.formula(paste(var, "~ Stigma")), design = NSDUH_subset)
+  
+  test <- regTermTest(model, ~ Stigma)
+  
+  result5 <- data.frame(
+    Variable = var,
+    Wald_Statistic = round(test$Ftest, 3),
+    P_Value = ifelse(test$p < 0.001, "<0.001", round(test$p, 3))
+  )
+  
+  return(result5)
+}
+
+kable(wald_svy5("Kessler_raw"))
+kable(wald_svy5("Barrier_total"))
+kable(wald_svy5("Barrier_grouptotal"))
+```
+
+# Row Totals Bivariable Table 2.0
+```{r}
+library(survey)
+library(dplyr)
+library(tidyr)
+library(knitr)
+
+categorical_var <- c("Age", "Sex", "Marital_status", "Education", "Race", "Urbanicity", "Poverty", "Income", "Health_status", "Employment_status", "SUD", "Drug_Use", "Alcohol_Use", "Insurance", "Distress", "Disability")
+
+dv_groups <- c("Cost", "Structural", "Minimization", "Low_perc_eff", "Stigma")
+
+svyby(~Cost, ~Race, NSDUH_subset, svyciprop, method = "logit", vartype = "ci")
+svyby(~Structural, ~Race, NSDUH_subset, svyciprop, method = "logit", vartype = "ci")
+svyby(~Minimization, ~Race, NSDUH_subset, svyciprop, method = "logit", vartype = "ci")
+svyby(~Low_perc_eff, ~Race, NSDUH_subset, svyciprop, method = "logit", vartype = "ci")
+svyby(~Stigma, ~Race, NSDUH_subset, svyciprop, method = "logit", vartype = "ci")
+
+barriers_by_distress <- function(barrier) {
+  prop_table <- svyby(as.formula(paste0("~", barrier)), ~Distress, NSDUH_subset, svyciprop, method = "logit", vartype = "ci")
+  chi_test <- svychisq(as.formula(paste0("~", barrier, " + Distress")), NSDUH_subset)
+   p_value <- round(chi_test$p.value, 3)
+  list(Proportions = prop_table, Chi_Square = chi_test)
+}
+
+results_ <- lapply(dv_groups, barriers_by_distress)
+
+results_
+```
+
+```{r}
+distress_race <- svyby(
+  ~ Distress, 
+  ~ Race, 
+  NSDUH_subset, 
+  svymean, 
+  na.rm = TRUE, 
+  vartype = c("ci") # Directly computes confidence intervals
+)
+
+chi_test <- svychisq(~ Distress + Race, NSDUH_subset)
+
+kable(distress_race, digits = 3, caption = "Proportion of Distress Levels by Race/Ethnicity with 95% CI")
+print(chi_test)
+
+#Adding new var
+svymean(~ Income, NSDUH_subset)
+confint(svymean(~ Income, NSDUH_subset))
+svymean(~ Drug_Use, NSDUH_subset)
+confint(svymean(~ Drug_Use, NSDUH_subset))
+svymean(~ Alcohol_Use, NSDUH_subset)
+confint(svymean(~ Alcohol_Use, NSDUH_subset))
+
+```
+
+# Chi-sq rows
+```{r}
+barriers_by_cov <- function(barrier) {
+  svyby(
+    ~ Drug_Use + Income + Alcohol_Use,  
+    ~ dv_groups,  
+    NSDUH_subset,
+    svymean,
+    vartype = "ci"
+  )
+}
+
+barrier_results <- lapply(dv_groups, barriers_by_cov)
+
+barrier_results
+
+```
+
+
+# Correlation among predictors 
+```{r}
+NSDUH_long <- NSDUH_long %>%
+  mutate(across(c(Distress, Age, Sex, Marital_status, Race, Urbanicity, 
+                  Poverty, Health_status, Employment_status, SUD, Insurance, 
+                  Disability, Income, Drug_Use, Alcohol_Use, Barrier_Present), as.numeric))
+
+numeric_df <- NSDUH_long %>%
+  dplyr::select(Distress, Age, Sex, Marital_status, Race, Urbanicity, 
+         Poverty, Health_status, Employment_status, SUD, Insurance, 
+         Disability, Income, Drug_Use, Alcohol_Use) %>%
+  mutate_all(as.numeric)
+
+cor_matrix <- cor(numeric_df, use = "pairwise.complete.obs")
+caret::findCorrelation(cor_matrix, cutoff = 0.9, names = TRUE)
+```
+
+
+```{r}
+NSDUH_weighted <- as.data.frame(NSDUH_subset$variables)
+```
+
+# Logistic Regressions 
+
+```{r}
+barriers <- c("Cost", "Structural", "Minimization", "Low_perc_eff", "Stigma")
+
+for (var in barriers) {
+  NSDUH_subset[[var]] <- ifelse(as.character(NSDUH_subset[[var]]) == "Yes", 1,
+                                ifelse(as.character(NSDUH_subset[[var]]) == "No", 0, NA))
+}
+```
+
+
+```{r}
+#Outcome ~ Predictor
+model1_cost <- svyglm(Cost ~ Distress, design= NSDUH_subset, family=quasibinomial())
+model1_struc <- svyglm(Structural ~ Distress, design= NSDUH_subset, family=quasibinomial())
+model1_min <- svyglm(Minimization ~ Distress, design= NSDUH_subset, family=quasibinomial())
+model1_lowp <- svyglm(Low_perc_eff ~ Distress, design= NSDUH_subset, family=quasibinomial())
+model1_stigma <- svyglm(Stigma ~ Distress, design= NSDUH_subset, family=quasibinomial())
+
+wb <- createWorkbook()
+
+model_list <- list(
+  Cost         = model1_cost,
+  Structural   = model1_struc,
+  Minimization = model1_min,
+  Low_Perc_Eff = model1_lowp,
+  Stigma       = model1_stigma
+)
+
+for (name in names(model_list)) {
+  sheet_data <- tidy(model_list[[name]],
+                     exponentiate = TRUE, conf.int = TRUE) %>%
+    select(term, estimate, conf.low, conf.high, p.value) %>%
+    rename(
+      OR = estimate,
+      `95% CI Lower` = conf.low,
+      `95% CI Upper` = conf.high,
+      `P-value` = p.value
+    )
+  
+  addWorksheet(wb, name)
+  writeData(wb, sheet = name, sheet_data)
+}
+
+saveWorkbook(wb, "model1_output.xlsx", overwrite = TRUE)
+```
+
+```{r}
+NSDUH_subset$variables$Race <- relevel(NSDUH_subset$variables$Race, ref = "Non-Hisp White")
+
+#Outcome ~ Predictor + Covariates
+model2_cost <- svyglm(Cost ~ Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=quasibinomial())
+model2_struc <- svyglm(Structural ~ Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=quasibinomial())
+model2_min <- svyglm(Minimization ~ Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=quasibinomial())
+model2_lowp <- svyglm(Low_perc_eff ~ Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=quasibinomial())
+model2_stigma <- svyglm(Stigma ~ Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=quasibinomial())
+
+wb <- createWorkbook()
+
+model_list <- list(
+  Cost         = model2_cost,
+  Structural   = model2_struc,
+  Minimization = model2_min,
+  Low_Perc_Eff = model2_lowp,
+  Stigma       = model2_stigma
+)
+
+for (name in names(model_list)) {
+  sheet_data <- tidy(model_list[[name]],
+                     exponentiate = TRUE, conf.int = TRUE) %>%
+    select(term, estimate, conf.low, conf.high, p.value) %>%
+    rename(
+      OR = estimate,
+      `95% CI Lower` = conf.low,
+      `95% CI Upper` = conf.high,
+      `P-value` = p.value
+    )
+  
+  addWorksheet(wb, name)
+  writeData(wb, sheet = name, sheet_data)
+}
+
+saveWorkbook(wb, "model2_output2.xlsx", overwrite = TRUE)
+```
+
+```{r}
+#Outcome ~ Predictor + Interaction
+model3_cost <- svyglm(Cost ~ Distress * Race, design= NSDUH_subset, family=quasibinomial())
+model3_struc <- svyglm(Structural ~ Distress * Race, design= NSDUH_subset, family=quasibinomial())
+model3_min <- svyglm(Minimization ~ Distress * Race, design= NSDUH_subset, family=quasibinomial())
+model3_lowp <- svyglm(Low_perc_eff ~ Distress * Race, design= NSDUH_subset, family=quasibinomial())
+model3_stigma <- svyglm(Stigma ~ Distress * Race, design= NSDUH_subset, family=quasibinomial())
+
+wb <- createWorkbook()
+
+model_list <- list(
+  Cost         = model3_cost,
+  Structural   = model3_struc,
+  Minimization = model3_min,
+  Low_Perc_Eff = model3_lowp,
+  Stigma       = model3_stigma
+)
+
+for (name in names(model_list)) {
+  sheet_data <- tidy(model_list[[name]],
+                     exponentiate = TRUE, conf.int = TRUE) %>%
+    select(term, estimate, conf.low, conf.high, p.value) %>%
+    rename(
+      OR = estimate,
+      `95% CI Lower` = conf.low,
+      `95% CI Upper` = conf.high,
+      `P-value` = p.value
+    )
+  
+  addWorksheet(wb, name)
+  writeData(wb, sheet = name, sheet_data)
+}
+
+saveWorkbook(wb, "model3_output.xlsx", overwrite = TRUE)
+```
+
+```{r}
+#Outcome ~ Predictor + Covariates + Interaction
+model4_cost <- svyglm(Cost ~ Distress * Race + Age + Sex + Marital_status + Education + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=quasibinomial())
+model4_struc <- svyglm(Structural ~ Distress * Race + Age + Sex + Marital_status + Education + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=quasibinomial())
+model4_min <- svyglm(Minimization ~ Distress * Race + Age + Sex + Marital_status + Education + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=quasibinomial())
+model4_lowp <- svyglm(Low_perc_eff ~ Distress * Race + Age + Sex + Marital_status + Education + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=quasibinomial())
+model4_stigma <- svyglm(Stigma ~ Distress * Race + Age + Sex + Marital_status + Education + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=quasibinomial())
+
+wb <- createWorkbook()
+
+model_list <- list(
+  Cost         = model4_cost,
+  Structural   = model4_struc,
+  Minimization = model4_min,
+  Low_Perc_Eff = model4_lowp,
+  Stigma       = model4_stigma
+)
+
+for (name in names(model_list)) {
+  sheet_data <- tidy(model_list[[name]],
+                     exponentiate = TRUE, conf.int = TRUE) %>%
+    select(term, estimate, conf.low, conf.high, p.value) %>%
+    rename(
+      OR = estimate,
+      `95% CI Lower` = conf.low,
+      `95% CI Upper` = conf.high,
+      `P-value` = p.value
+    )
+  
+  addWorksheet(wb, name)
+  writeData(wb, sheet = name, sheet_data)
+}
+
+saveWorkbook(wb, "model4_output.xlsx", overwrite = TRUE)
+```
+
+# ROC curve comparability to gsem
+```{r}
+pdf("roc_plot4.pdf", width = 10, height = 8)
+
+library(pROC)
+
+logit_pred_cost4   <- predict(model4_cost, type = "response")
+logit_pred_struct4 <- predict(model4_struc, type = "response")
+logit_pred_min4    <- predict(model4_min, type = "response")
+logit_pred_lowp4   <- predict(model4_lowp, type = "response")
+logit_pred_stigma4 <- predict(model4_stigma, type = "response")
+
+
+roc_cost4   <- roc(NSDUH_subset$variables$Cost, logit_pred_cost4, levels = c("0", "1"), direction = "<")
+roc_struct4 <- roc(NSDUH_subset$variables$Structural, logit_pred_struct4, levels = c("0", "1"), direction = "<")
+roc_min4    <- roc(NSDUH_subset$variables$Minimization, logit_pred_min4, levels = c("0", "1"), direction = "<")
+roc_lowp4   <- roc(NSDUH_subset$variables$Low_perc_eff, logit_pred_lowp4, levels = c("0", "1"), direction = "<")
+roc_stigma4 <- roc(NSDUH_subset$variables$Stigma, logit_pred_stigma4, levels = c("0", "1"), direction = "<")
+
+
+auc_cost4   <- round(auc(roc_cost4), 3)
+auc_struct4 <- round(auc(roc_struct4), 3)
+auc_min4    <- round(auc(roc_min4), 3)
+auc_lowp4   <- round(auc(roc_lowp4), 3)
+auc_stigma4 <- round(auc(roc_stigma4), 3)
+
+plot(roc_cost4, col = "red", lwd = 2, main = "ROC Curves for Logit Model4")
+plot(roc_struct4, col = "blue", add = TRUE, lwd = 2)
+plot(roc_min4, col = "green", add = TRUE, lwd = 2)
+plot(roc_lowp4, col = "orange", add = TRUE, lwd = 2)
+plot(roc_stigma4, col = "purple", add = TRUE, lwd = 2)
+
+legend("bottomright", 
+       legend = c(paste("Cost (AUC =", auc_cost4, ")"),
+                  paste("Structural (AUC =", auc_struct4, ")"),
+                  paste("Minimization (AUC =", auc_min4, ")"),
+                  paste("Low Perc Eff (AUC =", auc_lowp4, ")"),
+                  paste("Stigma (AUC =", auc_stigma4, ")")),
+       col = c("red", "blue", "green", "orange", "purple"), 
+       lwd = 2,
+       bty="n", 
+       inset=0)
+
+roc_plot4 <- recordPlot()
+```
+```{r}
+pdf("roc_plot2.pdf", width = 10, height = 8)
+
+library(pROC)
+
+logit_pred_cost2   <- predict(model2_cost, type = "response")
+logit_pred_struct2 <- predict(model2_struc, type = "response")
+logit_pred_min2    <- predict(model2_min, type = "response")
+logit_pred_lowp2   <- predict(model2_lowp, type = "response")
+logit_pred_stigma2 <- predict(model2_stigma, type = "response")
+
+roc_cost2   <- roc(NSDUH_subset$variables$Cost, logit_pred_cost2, levels = c("0", "1"), direction = "<")
+roc_struct2 <- roc(NSDUH_subset$variables$Structural, logit_pred_struct2, levels = c("0", "1"), direction = "<")
+roc_min2    <- roc(NSDUH_subset$variables$Minimization, logit_pred_min2, levels = c("0", "1"), direction = "<")
+roc_lowp2   <- roc(NSDUH_subset$variables$Low_perc_eff, logit_pred_lowp2, levels = c("0", "1"), direction = "<")
+roc_stigma2 <- roc(NSDUH_subset$variables$Stigma, logit_pred_stigma2, levels = c("0", "1"), direction = "<")
+
+auc_cost2   <- round(auc(roc_cost2), 3)
+auc_struct2 <- round(auc(roc_struct2), 3)
+auc_min2    <- round(auc(roc_min2), 3)
+auc_lowp2   <- round(auc(roc_lowp2), 3)
+auc_stigma2 <- round(auc(roc_stigma2), 3)
+
+plot(roc_cost2, col = "red", lwd = 2, main = "ROC Curves for Logit Model2")
+plot(roc_struct2, col = "blue", add = TRUE, lwd = 2)
+plot(roc_min2, col = "green", add = TRUE, lwd = 2)
+plot(roc_lowp2, col = "orange", add = TRUE, lwd = 2)
+plot(roc_stigma2, col = "purple", add = TRUE, lwd = 2)
+
+legend("bottomright", 
+       legend = c(paste("Cost (AUC =", auc_cost2, ")"),
+                  paste("Structural (AUC =", auc_struct2, ")"),
+                  paste("Minimization (AUC =", auc_min2, ")"),
+                  paste("Low Perc Eff (AUC =", auc_lowp2, ")"),
+                  paste("Stigma (AUC =", auc_stigma2, ")")),
+       col = c("red", "blue", "green", "orange", "purple"), 
+       lwd = 2,
+       bty="n",
+       inset=0)
+
+roc_plot2 <- recordPlot()
+```
+
+```{r}
+pdf("roc_plot1.pdf", width = 10, height = 8)
+library(pROC)
+
+logit_pred_cost1   <- predict(model1_cost, type = "response")
+logit_pred_struct1 <- predict(model1_struc, type = "response")
+logit_pred_min1    <- predict(model1_min, type = "response")
+logit_pred_lowp1   <- predict(model1_lowp, type = "response")
+logit_pred_stigma1 <- predict(model1_stigma, type = "response")
+
+roc_cost1   <- roc(NSDUH_subset$variables$Cost, logit_pred_cost1, levels = c("0", "1"), direction = "<")
+roc_struct1 <- roc(NSDUH_subset$variables$Structural, logit_pred_struct1, levels = c("0", "1"), direction = "<")
+roc_min1    <- roc(NSDUH_subset$variables$Minimization, logit_pred_min1, levels = c("0", "1"), direction = "<")
+roc_lowp1   <- roc(NSDUH_subset$variables$Low_perc_eff, logit_pred_lowp1, levels = c("0", "1"), direction = "<")
+roc_stigma1 <- roc(NSDUH_subset$variables$Stigma, logit_pred_stigma1, levels = c("0", "1"), direction = "<")
+
+auc_cost1   <- round(auc(roc_cost1), 3)
+auc_struct1 <- round(auc(roc_struct1), 3)
+auc_min1    <- round(auc(roc_min1), 3)
+auc_lowp1   <- round(auc(roc_lowp1), 3)
+auc_stigma1 <- round(auc(roc_stigma1), 3)
+
+plot(roc_cost1, col = "red", lwd = 2, main = "ROC Curves for Logit Model1")
+plot(roc_struct1, col = "blue", add = TRUE, lwd = 2)
+plot(roc_min1, col = "green", add = TRUE, lwd = 2)
+plot(roc_lowp1, col = "orange", add = TRUE, lwd = 2)
+plot(roc_stigma1, col = "purple", add = TRUE, lwd = 2)
+
+legend("bottomright", 
+       legend = c(paste("Cost (AUC =", auc_cost1, ")"),
+                  paste("Structural (AUC =", auc_struct1, ")"),
+                  paste("Minimization (AUC =", auc_min1, ")"),
+                  paste("Low Perc Eff (AUC =", auc_lowp1, ")"),
+                  paste("Stigma (AUC =", auc_stigma1, ")")),
+       col = c("red", "blue", "green", "orange", "purple"), 
+       lwd = 2,
+       bty= "n",
+       inset=0)
+
+roc_plot1 <- recordPlot()
+```
+
+```{r}
+pdf("roc_plot3.pdf", width = 10, height = 8)
+
+library(pROC)
+
+logit_pred_cost3   <- predict(model3_cost, type = "response")
+logit_pred_struct3 <- predict(model3_struc, type = "response")
+logit_pred_min3    <- predict(model3_min, type = "response")
+logit_pred_lowp3   <- predict(model3_lowp, type = "response")
+logit_pred_stigma3 <- predict(model3_stigma, type = "response")
+
+roc_cost3   <- roc(NSDUH_subset$variables$Cost, logit_pred_cost3, levels = c("0", "1"), direction = "<")
+roc_struct3 <- roc(NSDUH_subset$variables$Structural, logit_pred_struct3, levels = c("0", "1"), direction = "<")
+roc_min3    <- roc(NSDUH_subset$variables$Minimization, logit_pred_min3, levels = c("0", "1"), direction = "<")
+roc_lowp3   <- roc(NSDUH_subset$variables$Low_perc_eff, logit_pred_lowp3, levels = c("0", "1"), direction = "<")
+roc_stigma3 <- roc(NSDUH_subset$variables$Stigma, logit_pred_stigma3, levels = c("0", "1"), direction = "<")
+
+auc_cost3   <- round(auc(roc_cost3), 3)
+auc_struct3 <- round(auc(roc_struct3), 3)
+auc_min3    <- round(auc(roc_min3), 3)
+auc_lowp3   <- round(auc(roc_lowp3), 3)
+auc_stigma3 <- round(auc(roc_stigma3), 3)
+
+plot(roc_cost3, col = "red", lwd = 2, main = "ROC Curves for Logit Model3")
+plot(roc_struct3, col = "blue", add = TRUE, lwd = 2)
+plot(roc_min3, col = "green", add = TRUE, lwd = 2)
+plot(roc_lowp3, col = "orange", add = TRUE, lwd = 2)
+plot(roc_stigma3, col = "purple", add = TRUE, lwd = 2)
+
+legend("bottomright", 
+       legend = c(paste("Cost (AUC =", auc_cost3, ")"),
+                  paste("Structural (AUC =", auc_struct3, ")"),
+                  paste("Minimization (AUC =", auc_min3, ")"),
+                  paste("Low Perc Eff (AUC =", auc_lowp3, ")"),
+                  paste("Stigma (AUC =", auc_stigma3, ")")),
+       col = c("red", "blue", "green", "orange", "purple"), 
+       lwd = 2,
+       bty = "n",      
+       inset = 0)
+
+roc_plot3 <- recordPlot()
+```
+
+# AUC Plot
+```{r}
+pdf("roc_faceted_plot.pdf", width = 10, height = 8)
+
+par(mfrow = c(2, 2),           
+    oma = c(0, 0, 3, 0))       
+
+replayPlot(roc_plot1)
+
+replayPlot(roc_plot2)
+
+replayPlot(roc_plot3)
+
+replayPlot(roc_plot4)
+
+
+dev.off()
+```
+
+
+
+```{r}
+library(ggalt)  # if you want dumbbell style
+
+auc_wide <- auc %>%
+  pivot_wider(names_from = Link, values_from = AUC)
+
+auc_wide <- auc_wide %>%
+  mutate(overlap = Logit == Probit)
+
+p <- ggplot(auc_wide, aes(x = Logit, xend = Probit, y = Barrier)) +
+  geom_dumbbell(
+    color = "gray80",
+    size = 3,
+    colour_x = "blue",
+    colour_xend = "red"
+  ) +
+  # Add a subtle mark for overlapping AUCs
+  geom_point(data = filter(auc_wide, overlap),
+             aes(x = Logit, y = Barrier),
+             color = "purple", size = 3, shape = 4) +  # X shape
+  facet_wrap(~ Model) + 
+  scale_color_manual(
+    name = "Link Function",
+    values = c("Logit" = "blue", "Probit" = "red")
+  ) +
+  labs(
+    title = "Logit vs. Probit AUCs by Barrier and Model",
+    x = "AUC",
+    y = "Barrier",
+    caption = "Purple '×' indicates Logit = Probit; Logit= Blue; Probit= Red"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none")
+
+ggsave("AUC_dumbbell_plot.png", plot = p, width = 10, height = 6, dpi = 300)
+
+auc_logit <- auc %>% filter(Link == "Logit") %>% select(!label)
+```
+
+
+```{r}
+auc_logit <- auc %>% filter(Link == "Logit") %>% select(!label)
+
+plot <- ggplot(auc_logit, aes(x = AUC, y = Barrier)) + geom_point(color = "red", size = 3) + facet_wrap(~Model) + theme_bw()
+
+ggsave("AUC_plot.png", plot = plot, width = 10, height = 6, dpi = 300)
+```
+
+# Stratified Analysis Repeat
+```{r}
+race <- c("Non-Hisp White", "Non-Hisp Black/Afr Am", "Non-Hisp Asian", "Hispanic", "Non-Hisp Multi Race")
+barriers <- c("Cost", "Structural", "Minimization", "Low_perc_eff", "Stigma")
+
+for (race in race) {
+  cat("\nRace:", race, "\n")
+  subset_design <- subset(NSDUH_subset, Race == race)
+  print(table(subset_design$variables$Distress))
+}
+```
+
+
+```{r}
+models_by_race <- list()
+
+#Cost 
+for (this_race in race) {  
+  
+  subset_design <- subset(NSDUH_subset, Race == this_race)
+  
+  if (length(unique(subset_design$variables$Cost)) > 1) {
+    
+    model <- svyglm(
+      Cost ~ Distress,
+      design = subset_design,
+      family = quasibinomial()
+    )
+    
+    models_by_race[[this_race]] <- model
+    
+    cat("\n=== Model for", this_race, "===\n")
+    print(summary(model))
+    
+  } else {
+    
+    cat("\n=== Skipped", this_race, "- Cost has only one level ===\n")
+    models_by_race[[this_race]] <- NA
+  }
+}
+
+#Structural
+models_by_race <- list()
+
+for (this_race in race) {  # <-- use 'this_race' for the current race
+  
+  subset_design <- subset(NSDUH_subset, Race == this_race)
+  
+  if (length(unique(subset_design$variables$Cost)) > 1) {
+    
+    model <- svyglm(
+      Structural ~ Distress,
+      design = subset_design,
+      family = quasibinomial()
+    )
+    
+    models_by_race[[this_race]] <- model
+    
+    cat("\n=== Model for", this_race, "===\n")
+    print(summary(model))
+    
+  } else {
+    
+    cat("\n=== Skipped", this_race, "- Structural has only one level ===\n")
+    models_by_race[[this_race]] <- NA
+  }
+}
+
+# Minimization
+models_by_race <- list()
+
+for (this_race in race) {  # <-- use 'this_race' for the current race
+  
+  subset_design <- subset(NSDUH_subset, Race == this_race)
+  
+  if (length(unique(subset_design$variables$Cost)) > 1) {
+    
+    model <- svyglm(
+      Minimization ~ Distress,
+      design = subset_design,
+      family = quasibinomial()
+    )
+    
+    models_by_race[[this_race]] <- model
+    
+    cat("\n=== Model for", this_race, "===\n")
+    print(summary(model))
+    
+  } else {
+    
+    cat("\n=== Skipped", this_race, "- Minimization has only one level ===\n")
+    models_by_race[[this_race]] <- NA
+  }
+}
+
+#Low perc 
+models_by_race <- list()
+
+for (this_race in race) {  # <-- use 'this_race' for the current race
+  
+  subset_design <- subset(NSDUH_subset, Race == this_race)
+  
+  if (length(unique(subset_design$variables$Cost)) > 1) {
+    
+    model <- svyglm(
+      Low_perc_eff ~ Distress,
+      design = subset_design,
+      family = quasibinomial()
+    )
+    
+    models_by_race[[this_race]] <- model
+    
+    cat("\n=== Model for", this_race, "===\n")
+    print(summary(model))
+    
+  } else {
+    
+    cat("\n=== Skipped", this_race, "- Low_perc_eff has only one level ===\n")
+    models_by_race[[this_race]] <- NA
+  }
+}
+
+#Stigma 
+models_by_race <- list()
+
+for (this_race in race) {  # <-- use 'this_race' for the current race
+  
+  subset_design <- subset(NSDUH_subset, Race == this_race)
+  
+  if (length(unique(subset_design$variables$Cost)) > 1) {
+    
+    model <- svyglm(
+      Stigma ~ Distress,
+      design = subset_design,
+      family = quasibinomial()
+    )
+    
+    models_by_race[[this_race]] <- model
+    
+    cat("\n=== Model for", this_race, "===\n")
+    print(summary(model))
+    
+  } else {
+    
+    cat("\n=== Skipped", this_race, "- Stigma has only one level ===\n")
+    models_by_race[[this_race]] <- NA
+  }
+}
+```
+
+```{r}
+library(broom)
+
+barriers <- c("Cost", "Structural", "Minimization", "Low_perc_eff", "Stigma")
+
+races <- c("Non-Hisp White", "Non-Hisp Black/Afr Am", "Non-Hisp Asian", "Hispanic", "Non-Hisp Multi Race")
+
+
+all_results <- data.frame()
+
+
+for (barrier in barriers) {
+  
+  cat("\n=== Running models for barrier:", barrier, "===\n")
+  
+  for (this_race in races) {
+    
+    subset_design <- subset(NSDUH_subset, Race == this_race)
+    
+    if (length(unique(subset_design$variables[[barrier]])) > 1) {
+      
+      model <- svyglm(
+        as.formula(paste0(barrier, " ~ Distress")),
+        design = subset_design,
+        family = quasibinomial()
+      )
+      
+      tidy_model <- tidy(model, conf.int = TRUE, exponentiate = TRUE)
+      
+      tidy_model <- tidy_model[grepl("Distress", tidy_model$term), ]
+      
+      tidy_model$Race <- this_race
+      tidy_model$Barrier <- barrier
+      
+      all_results <- rbind(all_results, tidy_model)
+      
+    } else {
+      
+      cat("=== Skipped", this_race, "-", barrier, "- no variability ===\n")
+      
+    }
+  }
+}
+
+```
+
+# Export 
+```{r}
+all_results$estimate <- round(all_results$estimate, 3)
+all_results$conf.low <- round(all_results$conf.low, 3)
+all_results$conf.high <- round(all_results$conf.high, 3)
+all_results$p.value <- round(all_results$p.value, 3)
+
+library(writexl)
+
+write_xlsx(all_results, "all_results.xlsx")
+
+```
+
+```{r}
+
+#Outcome ~ Predictor + Covariates
+model2_cost <- svyglm(Cost ~ Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=binomial())
+model2_struc <- svyglm(Structural ~ Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=binomial())
+model2_min <- svyglm(Minimization ~ Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=binomial())
+model2_lowp <- svyglm(Low_perc_eff ~ Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=binomial())
+model2_stigma <- svyglm(Stigma ~ Distress + Age + Sex + Marital_status + Education + Race + Urbanicity + Poverty + Health_status + Employment_status + SUD + Insurance + Disability + Income + Drug_Use + Alcohol_Use, design= NSDUH_subset, family=binomial())
+
+wb <- createWorkbook()
+
+model_list <- list(
+  Cost         = model2_cost,
+  Structural   = model2_struc,
+  Minimization = model2_min,
+  Low_Perc_Eff = model2_lowp,
+  Stigma       = model2_stigma
+)
+
+for (name in names(model_list)) {
+  sheet_data <- tidy(model_list[[name]],
+                     exponentiate = TRUE, conf.int = TRUE) %>%
+    select(term, estimate, conf.low, conf.high, p.value) %>%
+    rename(
+      OR = estimate,
+      `95% CI Lower` = conf.low,
+      `95% CI Upper` = conf.high,
+      `P-value` = p.value
+    )
+  
+  addWorksheet(wb, name)
+  writeData(wb, sheet = name, sheet_data)
+}
+
+saveWorkbook(wb, "model2_binomial.xlsx", overwrite = TRUE)
+
+library(pROC)
+
+logit_pred_cost   <- predict(model2_cost, type = "response")
+logit_pred_struct <- predict(model2_struc, type = "response")
+logit_pred_min    <- predict(model2_min, type = "response")
+logit_pred_lowp   <- predict(model2_lowp, type = "response")
+logit_pred_stigma <- predict(model2_stigma, type = "response")
+
+roc_cost   <- roc(model2_cost$y, logit_pred_cost)
+roc_struct <- roc(model2_struc$y, logit_pred_struct)
+roc_min    <- roc(model2_min$y, logit_pred_min)
+roc_lowp   <- roc(model2_lowp$y, logit_pred_lowp)
+roc_stigma <- roc(model2_stigma$y, logit_pred_stigma)
+
+auc_cost   <- round(auc(roc_cost), 3)
+auc_struct <- round(auc(roc_struct), 3)
+auc_min    <- round(auc(roc_min), 3)
+auc_lowp   <- round(auc(roc_lowp), 3)
+auc_stigma <- round(auc(roc_stigma), 3)
+
+plot(roc_cost, col = "red", lwd = 2, main = "ROC Curves for Logit Model2 Binomial")
+
+plot(roc_struct, col = "blue", add = TRUE, lwd = 2)
+plot(roc_min, col = "green", add = TRUE, lwd = 2)
+plot(roc_lowp, col = "orange", add = TRUE, lwd = 2)
+plot(roc_stigma, col = "purple", add = TRUE, lwd = 2)
+
+legend("bottomright", 
+       legend = c(paste("Cost (AUC =", auc_cost, ")"),
+                  paste("Structural (AUC =", auc_struct, ")"),
+                  paste("Minimization (AUC =", auc_min, ")"),
+                  paste("Low Perc Eff (AUC =", auc_lowp, ")"),
+                  paste("Stigma (AUC =", auc_stigma, ")")),
+       col = c("red", "blue", "green", "orange", "purple"), 
+       lwd = 2)
+```
+
+
+
