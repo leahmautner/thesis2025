@@ -621,7 +621,7 @@ distress_contin_bivariable <- svyby(
 distress_contin_bivariable %>% mutate(across(where(is.numeric), round, 3)) %>% kable()
 ```
 
-## Chi-sq (CHECK W SOMEONE)
+## Chi-sq 
 ```{r}
 NSDUH_subset$Age <- droplevels(NSDUH_subset$Age)
 NSDUH_subset$Education <- droplevels(NSDUH_subset$Education)
